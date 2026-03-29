@@ -7,7 +7,7 @@ from datasets import load_dataset
 # Path configuration (ALL RELATIVE PATHS FOR OPEN-SOURCE USE)
 # ============================================================
 
-DATASET_PATH = "dataset/capnav_v0_no_answer.parquet"
+DATASET_PATH = "dataset/capnav_v0_with_answer.parquet"
 AGENT_PROFILES_PATH = "dataset/agent_profiles.parquet"
 
 # Output directory for generated prompt files

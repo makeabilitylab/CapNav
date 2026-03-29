@@ -28,21 +28,21 @@ fi
 nvidia-smi >/dev/null 2>&1 || { echo "❌ nvidia-smi failed; driver/GPU not ready."; exit 1; }
 
 # -----------------------------------------------------
-# Base paths (override-friendly; defaults keep your cluster choices)
+# Base paths (override-friendly; defaults use $HOME so any user can run this)
 # -----------------------------------------------------
-SCR_ROOT="${SCR_ROOT:-/scr}"
-CONDA_DIR="${CONDA_DIR:-/scr/anaconda3_ruiqi}"
+SCR_ROOT="${SCR_ROOT:-$HOME}"
+CONDA_DIR="${CONDA_DIR:-$HOME/anaconda3}"
 INSTALLER="${INSTALLER:-Anaconda3-2025.06-0-Linux-x86_64.sh}"
-REPO_DIR="${REPO_DIR:-/scr/Spatial-MLLM}"
+REPO_DIR="${REPO_DIR:-$HOME/Spatial-MLLM}"
 
-PIP_CACHE_DIR="${PIP_CACHE_DIR:-/scr/pip_cache}"
-TMPDIR="${TMPDIR:-/scr/tmp}"
+PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
+TMPDIR="${TMPDIR:-/tmp}"
 
-# HF caches (defaults keep your cluster choices; override in README if needed)
-export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/scr/ruiqi/hf_cache}"
-export HF_HOME="${HF_HOME:-/gscratch/makelab/ruiqi/hf_home}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/scr/ruiqi/hf_datasets}"
-export HF_HUB_CACHE="${HF_HUB_CACHE:-/scr/ruiqi/hf_hub_cache}"
+# HF caches (defaults to standard ~/.cache/huggingface paths; override as needed)
+export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HOME/.cache/huggingface/transformers}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HOME/.cache/huggingface/datasets}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$HOME/.cache/huggingface/hub}"
 
 mkdir -p "$PIP_CACHE_DIR" "$TMPDIR" "$TRANSFORMERS_CACHE" "$HF_HOME" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
 
@@ -52,7 +52,7 @@ echo "✅ HF_HOME      → $HF_HOME"
 echo "✅ HF caches    → $TRANSFORMERS_CACHE"
 
 # -----------------------------------------------------
-# Step 1. Move to /scr and prepare base paths
+# Step 1. Move to SCR_ROOT and prepare base paths
 # -----------------------------------------------------
 cd "$SCR_ROOT"
 

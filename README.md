@@ -122,7 +122,7 @@ including the benchmark parquet files, agent profiles, and full ground-truth ann
 ```bash
 hf download RichardC0216/CapNav \
   --repo-type dataset \
-  --local-dir data/CapNav \
+  --local-dir dataset \
   --resume-download
 ```
 Video data should be downloaded separately from [Google Drive](https://drive.google.com/drive/folders/1NUAE02OPMaf3GnMfXHnuZNktk8cotD4u?usp=sharing).
