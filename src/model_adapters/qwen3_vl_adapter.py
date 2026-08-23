@@ -2,13 +2,13 @@ import os
 import re
 import json
 import time
-from typing import List, Tuple, Dict, Any, Optional  # CHANGED: add Optional
+from typing import List, Tuple, Dict, Any, Optional
 
 import torch
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
 
-# CHANGED: centralized scene selection helper (shared across adapters)
 from src.utils.scene_select import resolve_scenes
+from src.utils.output_parsing import extract_records
 
 
 # ============================================================
@@ -86,9 +86,6 @@ def normalize_hf_model_id(user_model: str) -> str:
     return f"{DEFAULT_ORG}/{user_model}"
 
 
-# CHANGED: removed local detect_scenes_from_graphs(); use resolve_scenes() from utils
-
-
 def load_prompts(prompt_root: str, scene: str) -> List[Tuple[str, str]]:
     scene_dir = os.path.join(prompt_root, scene)
     if not os.path.isdir(scene_dir):
@@ -143,34 +140,6 @@ def infer_required_thinking_from_checkpoint(hf_model_id: str) -> str:
 # ============================================================
 # Output parsing helpers (keep consistent with other adapters)
 # ============================================================
-
-def strip_code_fences(text: str) -> str:
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.strip("`").strip()
-        if t.lower().startswith("json"):
-            t = t[4:].strip()
-    return t
-
-
-def extract_json_candidate(text: str) -> str:
-    t = strip_code_fences(text)
-
-    # trim leading text before first { or [
-    start_candidates = [i for i in [t.find("["), t.find("{")] if i != -1]
-    if start_candidates:
-        start = min(start_candidates)
-        if start > 0:
-            t = t[start:].strip()
-
-    a = t.find("[")
-    b = t.rfind("]")
-    if a != -1 and b != -1 and b > a:
-        return t[a:b + 1].strip()
-
-    # fallback: return full trimmed text (caller will json.loads and catch)
-    return t.strip()
-
 
 def log_failure(fail_path: str, prompt_name: str, error_message: str, elapsed: float) -> None:
     record = {
@@ -268,8 +237,7 @@ def run_one(
         trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )[0].strip()
 
-    json_str = extract_json_candidate(raw_text)
-    return {"raw_text": raw_text, "json_str": json_str}
+    return {"raw_text": raw_text}
 
 
 # ============================================================
@@ -280,7 +248,7 @@ def run_qwen3_vl(
     user_model: str,
     num_frames: int,
     thinking: str,
-    scenes_allowlist: Optional[List[str]] = None,  # CHANGED: new optional allowlist
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     """
     Public entry point:
@@ -334,7 +302,6 @@ def run_qwen3_vl(
 
     max_new_tokens = 8196
 
-    # CHANGED: use centralized resolver; supports allowlist and strict checking
     scenes = resolve_scenes(
         graph_dir,
         scenes_allowlist=scenes_allowlist,
@@ -383,13 +350,14 @@ def run_qwen3_vl(
                 entry["raw_text"] = out["raw_text"]
                 entry["time_sec"] = round(time.time() - t0, 2)
 
-                try:
-                    entry["result"] = json.loads(out["json_str"])
-                except Exception:
+                records, cleaned, parse_error = extract_records(out["raw_text"], ptext)
+                if parse_error is None:
+                    entry["result"] = records
+                else:
                     entry["result"] = None
-                    entry["parse_error"] = True
-                    entry["json_str"] = out["json_str"][:20000]
-                    log_failure(fail_path, prompt_stem, "JSONParseError", time.time() - t0)
+                    entry["parse_error"] = parse_error
+                    entry["json_str"] = cleaned[:20000]
+                    log_failure(fail_path, prompt_stem, parse_error, time.time() - t0)
 
                 with open(out_file, "w", encoding="utf-8") as f:
                     json.dump(entry, f, indent=2, ensure_ascii=False)
@@ -397,6 +365,7 @@ def run_qwen3_vl(
             except Exception as e:
                 entry["time_sec"] = round(time.time() - t0, 2)
                 entry["error"] = repr(e)
+                entry["result"] = None
                 log_failure(fail_path, prompt_stem, repr(e), time.time() - t0)
 
                 with open(out_file, "w", encoding="utf-8") as f:

@@ -2,15 +2,15 @@ import os
 import re
 import json
 import time
-from typing import List, Tuple, Dict, Any, Optional  # CHANGED: add Optional
+from typing import List, Tuple, Dict, Any, Optional
 
 import torch
 from vllm import LLM, SamplingParams
 from transformers import AutoProcessor, AutoTokenizer
 from qwen_vl_utils import process_vision_info
 
-# CHANGED: centralized scene selection helper (shared across adapters)
 from src.utils.scene_select import resolve_scenes
+from src.utils.output_parsing import extract_records
 
 
 # ============================================================
@@ -23,12 +23,9 @@ VIDEO_ROOT  = os.environ.get("CAPNAV_VIDEO_ROOT", "videos_64frames_1fps")
 RESULT_ROOT = os.environ.get("CAPNAV_RESULT_ROOT", "results")
 
 
-
 # ============================================================
 # IO helpers
 # ============================================================
-
-# CHANGED: removed local detect_scenes_from_graphs(); use resolve_scenes() from utils
 
 
 def load_prompts(prompt_root: str, scene: str) -> List[Tuple[str, str]]:
@@ -69,56 +66,11 @@ def log_failure(
 
 
 # ============================================================
-# Output parsing (keep minimal; do NOT invent extra heuristics)
+# Failure logging
 # ============================================================
 
-def strip_code_fences(text: str) -> str:
-    t = (text or "").strip()
-    if t.startswith("```"):
-        # remove leading/backticks loosely (same behavior as your other adapters)
-        t = t.strip("`").strip()
-        if t.lower().startswith("json"):
-            t = t[4:].strip()
-    return t
-
-
-def extract_json_candidate(text: str) -> str:
-    """
-    Minimal JSON candidate extraction:
-    - strip code fences
-    - if contains [...] take the outermost list
-    - else if contains {...} keep from first '{' to last '}'
-    - else return stripped text
-    """
-    t = strip_code_fences(text)
-
-    a = t.find("[")
-    b = t.rfind("]")
-    if a != -1 and b != -1 and b > a:
-        return t[a:b + 1].strip()
-
-    a = t.find("{")
-    b = t.rfind("}")
-    if a != -1 and b != -1 and b > a:
-        return t[a:b + 1].strip()
-
-    return t.strip()
-
-
-def extract_answer_block(raw_text: str) -> str:
-    """
-    Video-R1 thinking prompt requires final JSON inside <answer>...</answer>.
-    If absent, fall back to raw_text.
-    """
-    t = (raw_text or "").strip()
-    m = re.search(r"<answer>([\s\S]*?)</answer>", t)
-    if m:
-        return m.group(1).strip()
-    return t
-
-
 # ============================================================
-# Prompt template (your original)
+# Prompt template
 # ============================================================
 
 def build_prompt(custom_prompt: str) -> str:
@@ -163,7 +115,7 @@ def init_videor1_llm(model_name: str):
     tokenizer.padding_side = "left"
     processor.tokenizer = tokenizer
 
-    # Reduce repeated rescale warnings (same as your script)
+    # Reduce repeated rescale warnings 
     if hasattr(processor, "image_processor"):
         processor.image_processor.do_rescale = False
     if hasattr(processor, "video_processor"):
@@ -180,14 +132,14 @@ def run_videor1(
     user_model: str,
     num_frames: int,
     thinking: str,
-    scenes_allowlist: Optional[List[str]] = None,  # CHANGED: new optional allowlist
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     """
     Public entry point for scripts/run.py
 
     user_model: e.g. "Video-R1/Video-R1-7B"
     num_frames: 16 / 32 / 64  (sampling count from videos_64frames_1fps/<scene>.mp4)
-    thinking:   MUST be "on" for this adapter (as designed in your pipeline)
+    thinking:   MUST be "on" for this adapter
     """
     thinking_norm = (thinking or "").lower().strip()
     if thinking_norm != "on":
@@ -209,7 +161,6 @@ def run_videor1(
     # init model
     llm, processor, sampling_params = init_videor1_llm(user_model)
 
-    # CHANGED: use centralized resolver; supports allowlist and strict checking
     scenes = resolve_scenes(
         graph_dir,
         scenes_allowlist=scenes_allowlist,
@@ -230,17 +181,13 @@ def run_videor1(
 
         print(f"\n[SCENE] {scene} | prompts={len(prompts)} | video={os.path.basename(video_path)}")
 
-        summary: List[Dict[str, Any]] = []
-
         for i, (fname, ptext) in enumerate(prompts, 1):
             prompt_stem = os.path.splitext(fname)[0]
             out_file = os.path.join(out_dir, f"{prompt_stem}.json")
 
             # resume
             if os.path.exists(out_file):
-                print(f"⏭️  Skipping {fname} (already exists).")
-                with open(out_file, "r", encoding="utf-8") as f:
-                    summary.append(json.load(f))
+                print(f"[SKIP] {fname} (already exists).")
                 continue
 
             print(f"🚀 [{i}/{len(prompts)}] {fname}")
@@ -294,39 +241,31 @@ def run_videor1(
                 entry["raw_text"] = raw_text
                 entry["time_sec"] = round(time.time() - t0, 2)
 
-                answer_block = extract_answer_block(raw_text)
-                json_candidate = extract_json_candidate(answer_block)
-
-                try:
-                    entry["result"] = json.loads(json_candidate)
-                except Exception:
-                    entry["result"] = {
-                        "answer": "failed to answer the question",
-                        "path": [],
-                    }
-                    entry["parse_error"] = True
-                    entry["json_str"] = json_candidate[:20000]
-                    log_failure(fail_path, prompt_stem, "JSONParseError", time.time() - t0)
+                records, cleaned, parse_error = extract_records(raw_text, ptext)
+                if parse_error is None:
+                    entry["result"] = records
+                else:
+                    # `result: null` is how every adapter reports an unparsable
+                    # answer, so failure counts stay comparable across models.
+                    entry["result"] = None
+                    entry["parse_error"] = parse_error
+                    entry["json_str"] = cleaned[:20000]
+                    log_failure(fail_path, prompt_stem, parse_error, time.time() - t0)
 
                 with open(out_file, "w", encoding="utf-8") as f:
                     json.dump(entry, f, indent=2, ensure_ascii=False)
-                summary.append(entry)
 
             except Exception as e:
                 entry["time_sec"] = round(time.time() - t0, 2)
                 entry["error"] = repr(e)
-                entry["result"] = {
-                    "answer": "failed to answer the question",
-                    "path": [],
-                }
+                entry["result"] = None
                 # fail log
                 log_failure(fail_path, prompt_stem, repr(e), time.time() - t0)
 
                 with open(out_file, "w", encoding="utf-8") as f:
                     json.dump(entry, f, indent=2, ensure_ascii=False)
-                summary.append(entry)
 
-        merged = os.path.join(out_dir, f"{scene}_results.json")
-        with open(merged, "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-        print(f"[SCENE DONE] {scene} -> {merged}")
+        # Per-prompt files are the single source of truth: capnav_score.py
+        # scans every *.json under results/, so a per-scene roll-up would be
+        # re-counted as an unparsable record.
+        print(f"[SCENE DONE] {scene} -> {out_dir}")

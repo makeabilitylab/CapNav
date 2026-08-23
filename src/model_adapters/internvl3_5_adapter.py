@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from typing import List, Tuple, Dict, Any, Optional  # CHANGED: add Optional
+from typing import List, Tuple, Dict, Any, Optional
 
 import torch
 import numpy as np
@@ -11,8 +11,8 @@ from decord import VideoReader, cpu
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
 
-# CHANGED: centralized scene selection helper (shared across adapters)
 from src.utils.scene_select import resolve_scenes
+from src.utils.output_parsing import extract_records
 
 
 # ============================================================
@@ -95,7 +95,6 @@ def normalize_hf_model_id(user_model: str) -> str:
 # Scene/prompt/video helpers
 # ============================================================
 
-# CHANGED: removed local detect_scenes_from_graphs(); use resolve_scenes() from utils
 
 def load_prompts(prompt_root: str, scene: str) -> List[Tuple[str, str]]:
     scene_dir = os.path.join(prompt_root, scene)
@@ -233,48 +232,6 @@ def load_video_frames(
 # Output parsing helpers
 # ============================================================
 
-def strip_think_block_if_present(text: str) -> str:
-    t = (text or "").strip()
-    if "</think>" in t:
-        t = t.split("</think>", 1)[1].strip()
-    return t
-
-
-def strip_code_fences(text: str) -> str:
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.strip("`").strip()
-        if t.lower().startswith("json"):
-            t = t[4:].strip()
-    return t
-
-
-def remove_leading_answer_markers(text: str) -> str:
-    t = (text or "").strip()
-    for lead in ["Answer:", "Final Answer:", "final answer:", "答复：", "答案："]:
-        if t.startswith(lead):
-            t = t[len(lead):].strip()
-    return t
-
-
-def extract_json_candidate(text: str) -> str:
-    t = strip_code_fences(text)
-    t = remove_leading_answer_markers(t)
-
-    start_candidates = [i for i in [t.find("["), t.find("{")] if i != -1]
-    if start_candidates:
-        start = min(start_candidates)
-        if start > 0:
-            t = t[start:].strip()
-
-    a = t.find("[")
-    b = t.rfind("]")
-    if a != -1 and b != -1 and b > a:
-        return t[a:b + 1].strip()
-
-    return t.strip()
-
-
 def log_failure(fail_path: str, prompt_name: str, error_message: str, elapsed: float) -> None:
     record = {
         "prompt": prompt_name,
@@ -337,7 +294,7 @@ def run_internvl3_5(
     user_model: str,
     num_frames: int,
     thinking: str,
-    scenes_allowlist: Optional[List[str]] = None,  # CHANGED: new optional allowlist
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     """
     Public entry point:
@@ -359,7 +316,6 @@ def run_internvl3_5(
 
     model, tokenizer, generation_config = init_internvl(hf_model_id, thinking=thinking)
 
-    # CHANGED: use centralized resolver; supports allowlist and strict checking
     scenes = resolve_scenes(
         graph_dir,
         scenes_allowlist=scenes_allowlist,
@@ -421,19 +377,14 @@ def run_internvl3_5(
                 # Strict equivalence:
                 # - thinking=on: strip <think>...</think>
                 # - thinking=off: do NOT strip
-                text = raw_text
-                if thinking.lower().strip() == "on":
-                    text = strip_think_block_if_present(text)
-
-                json_candidate = extract_json_candidate(text)
-
-                try:
-                    entry["result"] = json.loads(json_candidate)
-                except Exception:
+                records, cleaned, parse_error = extract_records(raw_text, ptext)
+                if parse_error is None:
+                    entry["result"] = records
+                else:
                     entry["result"] = None
-                    entry["parse_error"] = True
-                    entry["json_str"] = json_candidate[:20000]
-                    log_failure(fail_path, prompt_stem, "JSONParseError", time.time() - t0)
+                    entry["parse_error"] = parse_error
+                    entry["json_str"] = cleaned[:20000]
+                    log_failure(fail_path, prompt_stem, parse_error, time.time() - t0)
 
                 with open(out_file, "w", encoding="utf-8") as f:
                     json.dump(entry, f, indent=2, ensure_ascii=False)
@@ -441,6 +392,7 @@ def run_internvl3_5(
             except Exception as e:
                 entry["time_sec"] = round(time.time() - t0, 2)
                 entry["error"] = repr(e)
+                entry["result"] = None
                 log_failure(fail_path, prompt_stem, repr(e), time.time() - t0)
 
                 with open(out_file, "w", encoding="utf-8") as f:

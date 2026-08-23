@@ -137,13 +137,26 @@ def load_agent_profiles_parquet(path: str) -> Dict[str, Dict[str, Any]]:
 def format_scene_nodes(scene_nodes: List[Dict[str, str]]) -> str:
     return "\n".join(f'{n["node_id"]} — {n["name"]}' for n in scene_nodes)
 
-def pick_example_question_same_scene(dataset, scene_id: str, fallback_question: str) -> str:
-    subset = dataset.filter(lambda x: x["scene_id"] == scene_id)
-    if len(subset) == 0:
-        return fallback_question
-    return subset[0]["question"]
+def build_scene_question_index(dataset) -> Dict[str, str]:
+    """Map each scene_id to its first question, in one pass over the dataset."""
+    index: Dict[str, str] = {}
+    for row in dataset:
+        scene_id = row.get("scene_id")
+        if scene_id is not None and scene_id not in index:
+            index[scene_id] = row["question"]
+    return index
 
-def build_prompt_from_row(row: Dict[str, Any], dataset, agent_profiles: Dict[str, Dict[str, Any]]) -> str:
+
+def pick_example_question_same_scene(
+    scene_question: Dict[str, str], scene_id: str, fallback_question: str
+) -> str:
+    return scene_question.get(scene_id, fallback_question)
+
+def build_prompt_from_row(
+    row: Dict[str, Any],
+    scene_question: Dict[str, str],
+    agent_profiles: Dict[str, Dict[str, Any]],
+) -> str:
     agent_name = row["agent_name"]
     agent = agent_profiles.get(agent_name)
     if agent is None:
@@ -151,7 +164,9 @@ def build_prompt_from_row(row: Dict[str, Any], dataset, agent_profiles: Dict[str
 
     node_list_text = format_scene_nodes(row["scene_nodes"])
 
-    example_q1 = pick_example_question_same_scene(dataset, row["scene_id"], fallback_question=row["question"])
+    example_q1 = pick_example_question_same_scene(
+        scene_question, row["scene_id"], fallback_question=row["question"]
+    )
     example_q2 = row["question"]
 
     example_outputs = EXAMPLE_ENTRIES.format(
@@ -223,12 +238,13 @@ def iter_rows(dataset):
 def main():
     dataset = load_dataset("parquet", data_files=DATASET_PATH)["train"]
     agent_profiles = load_agent_profiles_parquet(AGENT_PROFILES_PATH)
+    scene_question = build_scene_question_index(dataset)
 
     ensure_dir(OUTPUT_DIR)
 
     written = 0
     for row in iter_rows(dataset):
-        prompt = build_prompt_from_row(row, dataset, agent_profiles)
+        prompt = build_prompt_from_row(row, scene_question, agent_profiles)
         out_path = prompt_output_path(OUTPUT_DIR, row)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(prompt)

@@ -2,13 +2,13 @@ import os
 import re
 import json
 import time
-from typing import List, Tuple, Dict, Any, Optional  # CHANGED: add Optional
+from typing import List, Tuple, Dict, Any, Optional
 
 import torch
 from transformers import AutoProcessor, Glm4vForConditionalGeneration
 
-# CHANGED: centralized scene selection helper (shared across adapters)
 from src.utils.scene_select import resolve_scenes
+from src.utils.output_parsing import extract_records
 
 
 DEFAULT_ORG = "zai-org"
@@ -84,7 +84,6 @@ def model_basename(model_id: str) -> str:
 # Scene/prompt/video helpers
 # ============================================================
 
-# CHANGED: removed local detect_scenes_from_graphs(); use resolve_scenes() from utils
 
 def load_prompts(prompt_root: str, scene: str) -> List[Tuple[str, str]]:
     scene_dir = os.path.join(prompt_root, scene)
@@ -108,6 +107,17 @@ def get_video_path(video_root: str, scene: str) -> str:
     return v
 
 
+def log_failure(fail_path: str, prompt_name: str, error_message: str, elapsed: float) -> None:
+    record = {
+        "prompt": prompt_name,
+        "error": error_message,
+        "time_sec": round(elapsed, 2),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(fail_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 # ============================================================
 # Model init
 # ============================================================
@@ -128,7 +138,6 @@ def init_model(hf_model_id: str, base_fps: int, total_frames: int, num_frames: i
     )
     processor = AutoProcessor.from_pretrained(hf_model_id, use_fast=True)
 
-    # Keep your original fps logic as-is
     fps = (
         float(base_fps)
         if num_frames >= total_frames
@@ -184,19 +193,9 @@ def run_one(model, processor, video_path: str, prompt_text: str, fps: float, max
         clean_up_tokenization_spaces=False
     )[0].strip()
 
-    if "<think>" in raw_text:
-        raw_text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
-
-    m = re.search(r"<answer>(.*?)</answer>", raw_text, flags=re.DOTALL)
-    answer_block = m.group(1).strip() if m else raw_text
-
-    js = answer_block
-    a = answer_block.find("[")
-    b = answer_block.rfind("]")
-    if a != -1 and b != -1 and b > a:
-        js = answer_block[a:b + 1].strip()
-
-    return {"raw_text": raw_text, "json_str": js}
+    # Decoded with special tokens kept so the <think>/<answer> structure
+    # survives into raw_text; extract_records() unwraps it at parse time.
+    return {"raw_text": raw_text}
 
 
 # ============================================================
@@ -207,7 +206,7 @@ def run_glm4v_thinking(
     user_model: str,
     num_frames: int,
     thinking: str = "on",
-    scenes_allowlist: Optional[List[str]] = None,  # CHANGED: new optional allowlist
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     """
     GLM-4.1V-9B-Thinking runner.
@@ -250,7 +249,6 @@ def run_glm4v_thinking(
         num_frames=num_frames
     )
 
-    # CHANGED: use centralized resolver; supports allowlist and strict checking
     scenes = resolve_scenes(
         graph_dir,
         scenes_allowlist=scenes_allowlist,
@@ -264,6 +262,9 @@ def run_glm4v_thinking(
 
         out_dir = os.path.join(result_root, f"{model_name}_{num_frames}frames", scene)
         os.makedirs(out_dir, exist_ok=True)
+        fail_path = os.path.join(out_dir, "failed_prompts.jsonl")
+
+        print(f"\n[SCENE] {scene} | prompts={len(prompts)}")
 
         for fname, prompt_text in prompts:
             prompt_stem = os.path.splitext(fname)[0]
@@ -273,15 +274,6 @@ def run_glm4v_thinking(
                 continue
 
             t0 = time.time()
-            out = run_one(
-                model,
-                processor,
-                video_path,
-                prompt_text,
-                fps=fps,
-                max_new_tokens=max_new_tokens
-            )
-
             entry: Dict[str, Any] = {
                 "scene": scene,
                 "prompt_file": fname,
@@ -289,16 +281,36 @@ def run_glm4v_thinking(
                 "hf_model_id": hf_model_id,
                 "num_frames": num_frames,
                 "thinking": thinking_norm,
-                "time_sec": round(time.time() - t0, 2),
-                "raw_text": out["raw_text"],
             }
 
             try:
-                entry["result"] = json.loads(out["json_str"])
-            except Exception:
+                out = run_one(
+                    model,
+                    processor,
+                    video_path,
+                    prompt_text,
+                    fps=fps,
+                    max_new_tokens=max_new_tokens,
+                )
+                entry["raw_text"] = out["raw_text"]
+                entry["time_sec"] = round(time.time() - t0, 2)
+
+                records, cleaned, parse_error = extract_records(out["raw_text"], prompt_text)
+                if parse_error is None:
+                    entry["result"] = records
+                else:
+                    entry["result"] = None
+                    entry["parse_error"] = parse_error
+                    entry["json_str"] = cleaned[:20000]
+                    log_failure(fail_path, prompt_stem, parse_error, time.time() - t0)
+
+            except Exception as e:
+                # One bad prompt (OOM, decode error) must not abort a 45-scene run.
+                entry["time_sec"] = round(time.time() - t0, 2)
+                entry["error"] = repr(e)
                 entry["result"] = None
-                entry["parse_error"] = True
-                entry["json_str"] = out["json_str"][:20000]
+                log_failure(fail_path, prompt_stem, repr(e), time.time() - t0)
+                torch.cuda.empty_cache()
 
             with open(out_file, "w", encoding="utf-8") as f:
                 json.dump(entry, f, indent=2, ensure_ascii=False)

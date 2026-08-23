@@ -17,7 +17,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Optional, List  # MOD: add List
+from typing import Optional, List
 
 # ----------------------------
 # Repo root (since this file is scripts/run.py)
@@ -231,7 +231,7 @@ def _route_local(
     model_path: str,
     num_frames: int,
     thinking: str,
-    scenes_allowlist: Optional[List[str]] = None,  # MOD
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     """
     Local checkpoint routing: requires explicit --backend to avoid fuzzy inference.
@@ -256,7 +256,7 @@ def _route_local(
             user_model=model_path,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -265,7 +265,7 @@ def _route_local(
             user_model=model_path,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -274,7 +274,7 @@ def _route_local(
             user_model=model_path,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -284,7 +284,7 @@ def _route_local(
             user_model=model_path,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -294,7 +294,7 @@ def _route_local(
             user_model=model_path,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -304,7 +304,7 @@ def _route_local(
             user_model=model_path,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -318,7 +318,7 @@ def _route_hf(
     model: str,
     num_frames: int,
     thinking: str,
-    scenes_allowlist: Optional[List[str]] = None,  # MOD
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     # 1) Strict validation (HF ids only)
     if (
@@ -369,7 +369,7 @@ def _route_hf(
             user_model=canonical,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -378,7 +378,7 @@ def _route_hf(
             user_model=canonical,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -387,7 +387,7 @@ def _route_hf(
             user_model=canonical,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -397,7 +397,7 @@ def _route_hf(
             user_model=canonical,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -407,7 +407,7 @@ def _route_hf(
             user_model=canonical,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -417,7 +417,7 @@ def _route_hf(
             user_model=canonical,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -430,7 +430,7 @@ def route_and_run(
     thinking: str,
     model_path: Optional[str] = None,
     backend: Optional[str] = None,
-    scenes_allowlist: Optional[List[str]] = None,  # MOD
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     """
     Scheme 1:
@@ -448,7 +448,7 @@ def route_and_run(
             model_path=local,
             num_frames=num_frames,
             thinking=thinking,
-            scenes_allowlist=scenes_allowlist,  # MOD
+            scenes_allowlist=scenes_allowlist,
         )
         return
 
@@ -459,14 +459,15 @@ def route_and_run(
         model=model,
         num_frames=num_frames,
         thinking=thinking,
-        scenes_allowlist=scenes_allowlist,  # MOD
+        scenes_allowlist=scenes_allowlist,
     )
 
 
 # ----------------------------
 # CLI
 # ----------------------------
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Shared by run.py and run_sample.py so the two CLIs cannot drift."""
     parser = argparse.ArgumentParser(
         description="CapNav runner (open-source models, strict argument enforcement)."
     )
@@ -524,7 +525,11 @@ def main() -> None:
         help='Must be explicitly provided: "on" or "off".',
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     # Enforce Scheme 1 constraints
     if args.model_path:
@@ -540,7 +545,7 @@ def main() -> None:
         thinking=args.thinking,
         model_path=args.model_path,
         backend=args.backend,
-        scenes_allowlist=None,  # MOD: default behavior unchanged (run all scenes)
+        scenes_allowlist=None,
     )
 
 

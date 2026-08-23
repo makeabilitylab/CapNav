@@ -2,13 +2,13 @@ import os
 import re
 import json
 import time
-from typing import List, Tuple, Dict, Any, Optional  # CHANGED: add Optional
+from typing import List, Tuple, Dict, Any, Optional
 
 import torch
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 
-# CHANGED: centralized scene selection helper (shared across adapters)
 from src.utils.scene_select import resolve_scenes
+from src.utils.output_parsing import extract_records
 
 
 # ============================================================
@@ -92,7 +92,6 @@ def normalize_hf_model_id(user_model: str) -> str:
 # Scene/prompt/video helpers
 # ============================================================
 
-# CHANGED: removed local detect_scenes_from_graphs(); use resolve_scenes() from utils
 
 def load_prompts(prompt_root: str, scene: str) -> List[Tuple[str, str]]:
     scene_dir = os.path.join(prompt_root, scene)
@@ -117,42 +116,6 @@ def get_video_path(video_root: str, scene: str) -> str:
 # ============================================================
 # Output parsing helpers (aligned with your previous behavior)
 # ============================================================
-
-def strip_think_block(text: str) -> str:
-    """
-    Remove <think>...</think> if present.
-    """
-    t = (text or "").strip()
-    if "<think>" in t:
-        t = re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL).strip()
-    return t
-
-
-def strip_code_fences(text: str) -> str:
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.strip("`").strip()
-        if t.lower().startswith("json"):
-            t = t[4:].strip()
-    return t
-
-
-def extract_json_candidate(text: str) -> str:
-    """
-    Robustly try to pull a JSON array from the text:
-      - Strip code fences
-      - Find the outermost [...] if present
-      - Otherwise return trimmed text as-is
-    """
-    t = strip_code_fences(text)
-
-    a = t.find("[")
-    b = t.rfind("]")
-    if a != -1 and b != -1 and b > a:
-        return t[a:b + 1].strip()
-
-    return t.strip()
-
 
 def log_failure(fail_path: str, prompt_name: str, error_message: str, elapsed: float) -> None:
     record = {
@@ -273,7 +236,7 @@ def run_mimo_vl(
     user_model: str,
     num_frames: int,
     thinking: str,
-    scenes_allowlist: Optional[List[str]] = None,  # CHANGED: new optional allowlist
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     """
     Public entry point:
@@ -301,7 +264,6 @@ def run_mimo_vl(
     fps = num_frames_to_fps(num_frames)
     print(f"[VIDEO] total_frames={TOTAL_FRAMES} base_fps={BASE_FPS} num_frames={num_frames} -> fps={fps}")
 
-    # CHANGED: use centralized resolver; supports allowlist and strict checking
     scenes = resolve_scenes(
         graph_dir,
         scenes_allowlist=scenes_allowlist,
@@ -354,22 +316,14 @@ def run_mimo_vl(
                 entry["raw_text"] = raw_text
                 entry["time_sec"] = round(time.time() - t0, 2)
 
-                # Strict equivalence:
-                # - thinking=on: strip <think>...</think>
-                # - thinking=off: DO NOT strip (model is instructed via /no_think)
-                text_for_parse = raw_text
-                if thinking_tag == "on":
-                    text_for_parse = strip_think_block(text_for_parse)
-
-                json_candidate = extract_json_candidate(text_for_parse)
-
-                try:
-                    entry["result"] = json.loads(json_candidate)
-                except Exception:
+                records, cleaned, parse_error = extract_records(raw_text, ptext)
+                if parse_error is None:
+                    entry["result"] = records
+                else:
                     entry["result"] = None
-                    entry["parse_error"] = True
-                    entry["json_str"] = json_candidate[:20000]
-                    log_failure(fail_path, prompt_stem, "JSONParseError", time.time() - t0)
+                    entry["parse_error"] = parse_error
+                    entry["json_str"] = cleaned[:20000]
+                    log_failure(fail_path, prompt_stem, parse_error, time.time() - t0)
 
                 with open(out_file, "w", encoding="utf-8") as f:
                     json.dump(entry, f, indent=2, ensure_ascii=False)
@@ -377,6 +331,7 @@ def run_mimo_vl(
             except Exception as e:
                 entry["time_sec"] = round(time.time() - t0, 2)
                 entry["error"] = repr(e)
+                entry["result"] = None
                 log_failure(fail_path, prompt_stem, repr(e), time.time() - t0)
 
                 with open(out_file, "w", encoding="utf-8") as f:

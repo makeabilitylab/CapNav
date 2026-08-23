@@ -421,6 +421,28 @@ This repository provides the CapNav dataset, prompts, and evaluation protocol
 required to reproduce the benchmark, but does not include proprietary API
 wrappers or execution scripts.
 
+### 5. Output Parsing
+
+Model answers do not always arrive as clean JSON: they may be wrapped in
+`<think>`/`<answer>` tags, a `<json>` block or a Markdown code fence, and may be
+surrounded by prose. All adapters route their output through a single parser,
+`src/utils/output_parsing.py`, so a model is scored on what it answered rather
+than on how leniently its adapter happens to parse.
+
+The parser unwraps the answer, slices the first complete JSON value with a
+balanced scan, and normalises the result into the record schema
+`scripts/capnav_score.py` expects. Answers it cannot parse are stored with their
+cleaned text and a `parse_error`, so a failure can be re-parsed offline instead
+of re-running the model.
+
+If you add an adapter for a new model, call `extract_records(raw_text, prompt_text)`
+and write its return value to `entry["result"]` — that keeps your model
+comparable with the ones reported in the paper.
+
+```bash
+python tests/test_output_parsing.py     # no GPU, weights or dataset needed
+```
+
 ## 🛠 Annotation & Benchmark Construction
 
 CapNav was constructed using a multi-stage annotation pipeline,

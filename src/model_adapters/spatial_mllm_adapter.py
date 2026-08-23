@@ -5,12 +5,12 @@ import re
 import sys
 import json
 import time
-from typing import List, Tuple, Dict, Any, Optional  # CHANGED: add Optional
+from typing import List, Tuple, Dict, Any, Optional
 
 import torch
 
-# CHANGED: centralized scene selection helper (shared across adapters)
 from src.utils.scene_select import resolve_scenes
+from src.utils.output_parsing import extract_records
 
 
 # ============================================================
@@ -59,9 +59,6 @@ def _print_hf_cache_env_if_debug() -> None:
 # ============================================================
 # Scene/prompt/video helpers
 # ============================================================
-
-# CHANGED: removed local detect_scenes_from_graphs(); use resolve_scenes() from utils
-
 
 def load_prompts(prompt_root: str, scene: str) -> List[Tuple[str, str]]:
     scene_dir = os.path.join(prompt_root, scene)
@@ -117,42 +114,22 @@ def _ensure_spatial_mllm_src_on_path(spatial_mllm_root: str) -> str:
 
 
 # ============================================================
-# Output parsing (STRICTLY follows your <json>...</json> + fallback)
+# Failure logging
 # ============================================================
 
-def parse_spatial_mllm_output(raw_text: str) -> Dict[str, Any]:
-    fallback = {"answer": "failed to answer the question", "path": []}
-
-    match = re.search(r"<json>([\s\S]*?)</json>", raw_text or "")
-    if not match:
-        return dict(fallback)
-
-    content = match.group(1).strip()
-
-    ans_match = re.search(r'"answer"\s*:\s*"([^"]+)"', content)
-    answer = ans_match.group(1).strip() if ans_match else fallback["answer"]
-
-    reason_match = re.search(r'"reason"\s*:\s*"([^"]+)"', content)
-    reason = reason_match.group(1).strip() if reason_match else None
-
-    path_match = re.search(r'"path"\s*:\s*\[([^\]]*)\]', content)
-    if path_match:
-        path_items = [
-            item.strip().strip('"').strip("'")
-            for item in path_match.group(1).split(",")
-            if item.strip()
-        ]
-    else:
-        path_items = fallback["path"]
-
-    out: Dict[str, Any] = {"answer": answer, "path": path_items}
-    if reason:
-        out["reason"] = reason
-    return out
+def log_failure(fail_path: str, prompt_name: str, error_message: str, elapsed: float) -> None:
+    record = {
+        "prompt": prompt_name,
+        "error": error_message,
+        "time_sec": round(elapsed, 2),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(fail_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 # ============================================================
-# Model init + single prompt runner (ported from your script)
+# Model init + single prompt runner
 # ============================================================
 
 def init_spatial_mllm(user_model: str, device: str = "cuda"):
@@ -235,7 +212,7 @@ def run_spatial_mllm(
     user_model: str,
     num_frames: int,
     thinking: str = "on",
-    scenes_allowlist: Optional[List[str]] = None,  # CHANGED: new optional allowlist
+    scenes_allowlist: Optional[List[str]] = None,
 ) -> None:
     """
     Adapter API (matches scripts/run.py routing signature):
@@ -266,7 +243,6 @@ def run_spatial_mllm(
 
     model, processor, process_vision_info_fn = init_spatial_mllm(user_model, device=device)
 
-    # CHANGED: use centralized resolver; supports allowlist and strict checking
     scenes = resolve_scenes(
         graph_dir,
         scenes_allowlist=scenes_allowlist,
@@ -286,17 +262,14 @@ def run_spatial_mllm(
 
         out_dir = os.path.join(base_out, scene)
         os.makedirs(out_dir, exist_ok=True)
+        fail_path = os.path.join(out_dir, "failed_prompts.jsonl")
         print(f"\n[SCENE] {scene} | prompts={len(prompts)} | out={out_dir}")
-
-        results: List[Dict[str, Any]] = []
 
         for i, (fname, ptext) in enumerate(prompts, 1):
             stem = os.path.splitext(fname)[0]
             out_file = os.path.join(out_dir, f"{stem}.json")
 
             if os.path.exists(out_file):
-                with open(out_file, "r", encoding="utf-8") as f:
-                    results.append(json.load(f))
                 continue
 
             t0 = time.time()
@@ -319,21 +292,31 @@ def run_spatial_mllm(
                     device=device,
                 )
                 entry["raw_text"] = raw_text
-                entry["result"] = parse_spatial_mllm_output(raw_text)
                 entry["time_sec"] = round(time.time() - t0, 2)
+
+                records, cleaned, parse_error = extract_records(raw_text, ptext)
+                if parse_error is None:
+                    entry["result"] = records
+                else:
+                    # Keep the cleaned text so the failure can be re-parsed
+                    # offline rather than re-running the model.
+                    entry["result"] = None
+                    entry["parse_error"] = parse_error
+                    entry["json_str"] = cleaned[:20000]
+                    log_failure(fail_path, stem, parse_error, time.time() - t0)
 
             except Exception as e:
                 entry["raw_text"] = ""
-                entry["result"] = {"answer": "failed to answer the question", "path": []}
+                entry["result"] = None
                 entry["error"] = repr(e)
                 entry["time_sec"] = round(time.time() - t0, 2)
+                log_failure(fail_path, stem, repr(e), time.time() - t0)
                 torch.cuda.empty_cache()
 
             with open(out_file, "w", encoding="utf-8") as f:
                 json.dump(entry, f, indent=2, ensure_ascii=False)
-            results.append(entry)
 
-        merged = os.path.join(out_dir, f"{scene}_results.json")
-        with open(merged, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        print(f"[DONE] Scene completed → {merged}")
+        # Per-prompt files are the single source of truth: capnav_score.py
+        # scans every *.json under results/, so a per-scene roll-up would be
+        # re-counted as an unparsable record.
+        print(f"[DONE] Scene completed -> {out_dir}")

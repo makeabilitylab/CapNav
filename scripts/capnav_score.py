@@ -37,16 +37,24 @@ _SCENE_CACHE: Dict[str, Tuple[Dict, Dict]] = {}
 # =========================================================
 def discover_record_files(result_root: Path) -> List[Path]:
     """
-    Recursively find all *.json under results/.
-    Excludes our own score outputs.
+    Recursively find per-prompt record files under results/.
+
+    A record file is results/<model_setting>/<scene>/<prompt_stem>.json. Score
+    outputs and any aggregate roll-ups are skipped: their top level is a JSON
+    list, not a record, so counting them would add phantom structural failures
+    to every rate reported below.
     """
     if not result_root.exists():
         raise FileNotFoundError(f"RESULT_ROOT not found: {result_root}. Please run run.py first.")
 
     exclude = {OUT_SUMMARY.name, OUT_PER_RECORD.name, "scored_summary.json", "scored_per_record.jsonl"}
+    skip_suffixes = ("_results.json", "_failed.json", "_summary.json")
+
     files: List[Path] = []
     for p in result_root.rglob("*.json"):
         if p.name in exclude:
+            continue
+        if p.name.startswith("_") or p.name.endswith(skip_suffixes):
             continue
         files.append(p)
     return sorted(files)
